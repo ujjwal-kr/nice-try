@@ -25,3 +25,7 @@ env/bin/python main.py
 ```
 
 The script will read `GEMINI_API_KEY` from the environment (or `.env` via `python-dotenv`). It exits early if the key is missing, protecting you from accidentally shipping secrets.
+
+When interacting with the agent, you can also type `file` at the prompt to load the contents of a local file. The program will ask for the file path, read it in text mode (`"r"`), and use the file text as the input for the Hunter/Auditor loop. This keeps you from having to paste long logs directly into the console.
+
+When running, the agent now asks whether to emphasize MITRE ATT&CK descriptions, Knowledge/Skill/Ability/Task mappings, or both. The final report highlights the selected focus with the requested KSA breakdown, omitting job-role listings entirely.
