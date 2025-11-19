@@ -1,10 +1,10 @@
 import os
 import json
-import time
+import subprocess
 import google.generativeai as genai
-from google.generativeai import protos, types
+
 from dotenv import load_dotenv
-from typing import Dict, List, Any
+from typing import Dict, Optional
 
 # ==========================================
 # CONFIGURATION
@@ -20,6 +20,7 @@ genai.configure(api_key=API_KEY)
 
 # CONSTANTS
 MAX_LOOPS = 3
+INNER_LOOP_MAX = 3
 MODEL_NAME = 'gemini-2.5-flash-preview-09-2025'
 
 # ==========================================
@@ -145,12 +146,14 @@ class AuditorAgent:
         Your job is to VERIFY the research of a junior analyst.
         
         Process:
-        1. You will receive a JSON object containing MITRE and NICE codes.
-        2. You MUST use Google Search to verify if these codes actually exist and match the description.
-        3. Check for:
+        1. You will receive a JSON object containing MITRE and NICE codes from a junior analyst.
+        2. You will also receive context from an internal knowledge base, which is considered the source of truth.
+        3. You MUST use the internal knowledge base context to verify if the codes and descriptions from the junior analyst's draft are accurate.
+        4. Check for:
            - Hallucinated codes (e.g., T9999).
            - Deprecated codes.
            - Mismatched descriptions (e.g., Using a Network Scanning code for a Phishing attack).
+        5. If the internal knowledge base is empty, use your own knowledge and Google Search to verify.
         """
         
         self.output_format = """
@@ -169,6 +172,52 @@ class AuditorAgent:
     def verify(self, original_input: str, draft_json: Dict, focus: str = "both") -> Dict:
         print(f"    [Auditor] Verifying data against official sources...")
         
+        # Step 1: Extract only IDs from draft_json
+        ids = []
+        for key in ['mitre_attack', 'knowledge', 'skills', 'abilities', 'tasks']:
+            if key in draft_json:
+                for item in draft_json[key]:
+                    if 'id' in item:
+                        ids.append(item['id'])
+
+        ids = sorted(list(set(ids)))
+
+        # Step 2: Run ripgrep with the IDs
+        ripgrep_context = ""
+        if ids:
+            pattern = "|".join(ids)
+            data_dir = 'data'
+            print(f"    [Auditor] Searching for IDs: {pattern[:100]}...")
+            if os.path.exists(data_dir):
+                try:
+                    # Using -A 2 to get 2 lines of context after the match
+                    print(f"    [Auditor] Command: rg -i '{pattern}' {data_dir} --json -A 2")
+                    result = subprocess.run(
+                        ['rg', '-i', pattern, data_dir, '--json', '-A', '2'],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode == 0:
+                        for line in result.stdout.strip().split('\n'):
+                            try:
+                                match = json.loads(line)
+                                if match.get('type') == 'match':
+                                    new_context = f"Found in {match['data']['path']['text']}:\n"
+                                    new_context += match['data']['lines']['text']
+                                    if len(ripgrep_context) + len(new_context) < 6000:
+                                        ripgrep_context += new_context
+                                    else:
+                                        break
+                            except json.JSONDecodeError:
+                                continue
+                    elif result.returncode != 1:
+                        print(f"    [!] Ripgrep search failed: {result.stderr}")
+                except FileNotFoundError:
+                    print("    [!] Ripgrep (rg) not found. Please install ripgrep.")
+        else:
+            print(f"    [!] Data directory '{data_dir}' not found.")
+
+        # Step 3: Call the model for verification, now with ripgrep context
         json_str = json.dumps(draft_json, indent=2)
         safe_input = original_input.replace('"', "'")
         
@@ -186,7 +235,10 @@ class AuditorAgent:
         [JUNIOR ANALYST DRAFT]
         __DRAFT_JSON__
 
-        INSTRUCTION: verify the remaining entries that match the focus. If todos outside the focus exist, note them but prioritize the requested assignments.
+        [INTERNAL KNOWLEDGE BASE CONTEXT]
+        __RIPGREP_CONTEXT__
+
+        INSTRUCTION: Verify the junior analyst's draft against the internal knowledge base context. The internal context is the source of truth.
 
         [REQUIRED JSON OUTPUT FORMAT]
         __OUTPUT_FORMAT__
@@ -197,6 +249,7 @@ class AuditorAgent:
                             .replace("__FOCUS_INSTRUCTION__", focus_instruction) \
                             .replace("__USER_INPUT__", safe_input) \
                             .replace("__DRAFT_JSON__", json_str) \
+                            .replace("__RIPGREP_CONTEXT__", ripgrep_context if ripgrep_context else "No internal context found.") \
                             .replace("__OUTPUT_FORMAT__", self.output_format)
         
         try:
@@ -277,7 +330,7 @@ class DeepResearchSystem:
                 return response
             print("Please answer 'mitre', 'nice', or 'both'.")
 
-    def _read_user_file(self) -> str | None:
+    def _read_user_file(self) -> Optional[str]:
         path = input("Enter file path to load: ").strip()
         if not path:
             print("[!] No file path provided. Skipping file import.")
