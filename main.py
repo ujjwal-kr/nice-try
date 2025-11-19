@@ -165,7 +165,7 @@ class AuditorAgent:
 
         self.focus_instructions = {
             "mitre": "Only verify MITRE entries; if NICE entries are present, flag them as extraneous unless justified by an explicit MITRE description.",
-            "nice": "Only verify NICE entries; if MITRE entries appear, treat them as optional context and focus the audit on NICE correctness.",
+            "ksa": "Only verify KSA (NICE) entries. Do NOT fail the audit if MITRE ATT&CK entries are missing or empty. Focus strictly on the accuracy of Knowledge, Skills, Abilities, and Tasks.",
             "both": "Verify both MITRE and NICE entries for accuracy."
         }
 
@@ -174,7 +174,10 @@ class AuditorAgent:
         
         # Step 1: Extract only IDs from draft_json
         ids = []
-        for key in ['mitre_attack', 'knowledge', 'skills', 'abilities', 'tasks']:
+        # We only have MITRE data locally. KSA/NICE data is not in the 'data' directory.
+        keys_to_check = ['mitre_attack']
+
+        for key in keys_to_check:
             if key in draft_json:
                 for item in draft_json[key]:
                     if 'id' in item:
@@ -214,8 +217,8 @@ class AuditorAgent:
                         print(f"    [!] Ripgrep search failed: {result.stderr}")
                 except FileNotFoundError:
                     print("    [!] Ripgrep (rg) not found. Please install ripgrep.")
-        else:
-            print(f"    [!] Data directory '{data_dir}' not found.")
+            else:
+                print(f"    [!] Data directory '{data_dir}' not found.")
 
         # Step 3: Call the model for verification, now with ripgrep context
         json_str = json.dumps(draft_json, indent=2)
