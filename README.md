@@ -1,40 +1,25 @@
-# Deep Research Agent: Hunter & Auditor
+# Nice Try
 
-**A self-correcting cybersecurity research tool that maps informal descriptions to professional frameworks (MITRE ATT&CK & NICE).**
+A silly agent to convert natural language cyber threats into corporate terms.
 
-This repository implements a dual-agent architecture to ensure high-fidelity mappings of hacker activities to standardized industry frameworks. It leverages Google's Generative AI for reasoning and a local "source of truth" for verification.
+## 🔍 Overview
 
-## 🏗 Architecture
+The system employs a dual-phase approach to ensure high accuracy and relevance:
 
-The system operates on a **Hunter-Auditor** loop to minimize hallucinations and ensure accuracy.
+### 1. Analysis & Translation
+The agent first analyzes raw or informal descriptions of cyber threats. It translates colloquial terms into professional cybersecurity terminology and identifies relevant mappings within:
+- **MITRE ATT&CK**: For adversarial tactics and techniques.
+- **NICE Framework**: For workforce roles, knowledge, skills, and abilities.
 
-### 1. The Hunter (Research Agent)
-The Hunter analyzes raw, informal, or "hood" descriptions of cyber threats. Its job is to:
-- **Translate** slang and informal text into professional terminology.
-- **Map** activities to specific **MITRE ATT&CK** Technique IDs (e.g., `T1490`).
-- **Identify** relevant **NICE Framework** Knowledge, Skills, Abilities, and Tasks (KSAs).
-- **Output** a structured JSON draft.
+### 2. Verification & Quality Assurance
+To maintain data integrity, the system cross-references all identified codes against an official internal database. This verification step ensures that every mapped technique or skill is valid and accurately described, preventing errors in the final report.
 
-### 2. The Auditor (Verification Agent)
-The Auditor acts as a strict quality control gate. It does **not** trust the Hunter's output blindly. Instead, it:
-- **Extracts** IDs from the Hunter's draft.
-- **Searches** a local internal knowledge base (`data/` directory) using `ripgrep` to find the official definitions.
-- **Verifies** that the Hunter's usage matches the official source of truth.
-- **Rejects** hallucinations (e.g., non-existent codes) or mismatched descriptions.
-- **Provides Feedback** to the Hunter if errors are found.
+## ✨ Key Capabilities
 
-### 3. The Orchestrator
-The system manages a feedback loop (up to 3 retries). If the Auditor fails a draft, the feedback is sent back to the Hunter for a revised attempt. This ensures that the final output is both semantically relevant and factually correct.
-
-## ✨ Features
-
-- **Strict JSON Output**: All results are returned in a clean, machine-readable JSON format.
-- **Fact-Checking**: Uses `ripgrep` to validate every ID against a local dataset, preventing "AI hallucinations."
-- **Flexible Focus**: You can tell the agent to prioritize:
-    - `mitre`: Focus on ATT&CK Techniques.
-    - `ksa`: Focus on NICE Knowledge, Skills, and Abilities.
-    - `both`: Balance both frameworks (Default).
-- **Batch Processing**: Supports loading input from local files for processing large datasets.
+- **Automated Framework Mapping**: Instantly converts text into structured MITRE and NICE references.
+- **Fact-Based Verification**: Validates all outputs against official definitions to ensure accuracy.
+- **Customizable Focus**: Allows users to tailor the output to emphasize specific frameworks based on their reporting needs.
+- **Batch Processing**: Supports processing of bulk data from files for efficient workflow management.
 
 ## 🚀 Setup
 
@@ -66,7 +51,7 @@ python main.py
 ### Interactive Mode
 Simply type your query at the prompt:
 ```text
-INPUT >> I want to shut down the system to stop them from recovering data
+INPUT >> Massive ransomware attack
 ```
 
 ### File Mode
