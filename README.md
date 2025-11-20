@@ -35,7 +35,6 @@ To maintain data integrity, the system cross-references all identified codes aga
 3. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
-   # Ensure ripgrep is installed on your system (e.g., sudo apt install ripgrep)
    ```
 
 4. **Prepare Data**:
@@ -68,6 +67,6 @@ The agent will ask for your preferred focus area for each session:
 - **both**: Comprehensive mapping.
 
 ## 🛠 Requirements
-- Python 3.8+
-- `ripgrep` (rg) installed and accessible in PATH.
+- `python-dotenv`
+- `google-generativeai`
 - A valid Google Gemini API Key.

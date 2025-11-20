@@ -1,6 +1,5 @@
 import os
 import json
-import subprocess
 import google.generativeai as genai
 
 from dotenv import load_dotenv
@@ -185,40 +184,33 @@ class AuditorAgent:
 
         ids = sorted(list(set(ids)))
 
-        # Step 2: Run ripgrep with the IDs
-        ripgrep_context = ""
+        # Step 2: Retrieve context from internal knowledge base
+        internal_context = ""
         if ids:
-            pattern = "|".join(ids)
-            data_dir = 'data'
+            pattern = ", ".join(ids)
+            target_path = 'data/mitre_simple.json'
+            
             print(f"    [Auditor] Searching for IDs: {pattern[:100]}...")
-            if os.path.exists(data_dir):
+            
+            if os.path.exists(target_path):
                 try:
-                    # Using -A 2 to get 2 lines of context after the match
-                    print(f"    [Auditor] Command: rg -i '{pattern}' {data_dir} --json -A 2")
-                    result = subprocess.run(
-                        ['rg', '-i', pattern, data_dir, '--json', '-A', '2'],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if result.returncode == 0:
-                        for line in result.stdout.strip().split('\n'):
-                            try:
-                                match = json.loads(line)
-                                if match.get('type') == 'match':
-                                    new_context = f"Found in {match['data']['path']['text']}:\n"
-                                    new_context += match['data']['lines']['text']
-                                    if len(ripgrep_context) + len(new_context) < 6000:
-                                        ripgrep_context += new_context
-                                    else:
-                                        break
-                            except json.JSONDecodeError:
-                                continue
-                    elif result.returncode != 1:
-                        print(f"    [!] Ripgrep search failed: {result.stderr}")
-                except FileNotFoundError:
-                    print("    [!] Ripgrep (rg) not found. Please install ripgrep.")
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        mitre_data = json.load(f)
+                    
+                    # Filter locally in Python
+                    found_items = [item for item in mitre_data if item['id'] in ids]
+                    
+                    for item in found_items:
+                        new_context = f"Found in {target_path}:\n"
+                        new_context += json.dumps(item, indent=2) + "\n"
+                        if len(internal_context) + len(new_context) < 6000:
+                            internal_context += new_context
+                        else:
+                            break
+                except Exception as e:
+                    print(f"    [!] Error reading simplified MITRE file: {e}")
             else:
-                print(f"    [!] Data directory '{data_dir}' not found.")
+                print(f"    [!] Simplified MITRE file '{target_path}' not found. Run simplify_mitre.py first.")
 
         # Step 3: Call the model for verification, now with ripgrep context
         json_str = json.dumps(draft_json, indent=2)
@@ -239,7 +231,7 @@ class AuditorAgent:
         __DRAFT_JSON__
 
         [INTERNAL KNOWLEDGE BASE CONTEXT]
-        __RIPGREP_CONTEXT__
+        __INTERNAL_CONTEXT__
 
         INSTRUCTION: Verify the junior analyst's draft against the internal knowledge base context. The internal context is the source of truth.
 
@@ -252,7 +244,7 @@ class AuditorAgent:
                             .replace("__FOCUS_INSTRUCTION__", focus_instruction) \
                             .replace("__USER_INPUT__", safe_input) \
                             .replace("__DRAFT_JSON__", json_str) \
-                            .replace("__RIPGREP_CONTEXT__", ripgrep_context if ripgrep_context else "No internal context found.") \
+                            .replace("__INTERNAL_CONTEXT__", internal_context if internal_context else "No internal context found.") \
                             .replace("__OUTPUT_FORMAT__", self.output_format)
         
         try:
