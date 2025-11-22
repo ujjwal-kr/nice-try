@@ -18,7 +18,7 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # CONSTANTS
-MAX_LOOPS = 3
+MAX_LOOPS = 5
 INNER_LOOP_MAX = 3
 MODEL_NAME = 'gemini-2.5-flash-preview-09-2025'
 
@@ -29,6 +29,7 @@ class HunterAgent:
     def __init__(self):
         self.model = genai.GenerativeModel(
             model_name=MODEL_NAME,
+            generation_config=genai.types.GenerationConfig(temperature=0.4)
         )
         
         self.system_prompt = """
@@ -100,6 +101,14 @@ class HunterAgent:
         
         [REQUIRED JSON OUTPUT FORMAT]
         __OUTPUT_FORMAT__
+
+        [CRITICAL INSTRUCTION]
+        If the [PREVIOUS FEEDBACK] contains "[AUDITOR SUGGESTIONS]", you MUST incorporate those specific IDs into your new draft. They are from the internal database and are correct.
+        
+        [WARNING: LEGACY IDS]
+        Do NOT use legacy NICE Framework IDs like K0001, K0002, S0001, etc. unless they are explicitly defined in the context.
+        The internal database uses a newer version of the framework.
+        If you are unsure, describe the concept and let the Auditor suggest the correct ID.
         """
         
         safe_input = user_input.replace('"', "'")
@@ -138,27 +147,35 @@ class AuditorAgent:
     def __init__(self):
         self.model = genai.GenerativeModel(
             model_name=MODEL_NAME,
+            generation_config=genai.types.GenerationConfig(temperature=0.0)
         )
+        self.mitre_data = []
+        self.nice_data = []
+        self._load_knowledge_base()
         
         self.system_prompt = """
         You are a Senior Cybersecurity Compliance Auditor.
-        Your job is to VERIFY the research of a junior analyst.
+        Your job is to VERIFY the research of a junior analyst against an INTERNAL DATABASE.
+        
+        CRITICAL RULES:
+        1. **SOURCE OF TRUTH**: The "INTERNAL KNOWLEDGE BASE CONTEXT" provided to you is the ONLY valid source of truth.
+        2. **NO OUTSIDE KNOWLEDGE**: Do NOT use your own training data to verify codes. If a code is not in the context, it is INVALID.
+        3. **STRICT VERIFICATION**:
+           - If the junior analyst uses an ID (e.g., T1566, K0001) that is NOT defined in the "DEFINITIONS OF DRAFT IDS" section, you MUST FAIL the audit.
+           - Mark it as "Hallucinated ID" or "Invalid ID".
+        4. **ALTERNATIVES**: Use the "POTENTIAL ALTERNATIVES" section to suggest corrections if the draft is wrong.
         
         Process:
-        1. You will receive a JSON object containing MITRE and NICE codes from a junior analyst.
-        2. You will also receive context from an internal knowledge base, which is considered the source of truth.
-        3. You MUST use the internal knowledge base context to verify if the codes and descriptions from the junior analyst's draft are accurate.
-        4. Check for:
-           - Hallucinated codes (e.g., T9999).
-           - Deprecated codes.
-           - Mismatched descriptions (e.g., Using a Network Scanning code for a Phishing attack).
-        5. If the internal knowledge base is empty, use your own knowledge and Google Search to verify.
+        1. Check every ID in the draft against the "DEFINITIONS OF DRAFT IDS".
+        2. If an ID is missing from definitions -> FAIL (Reason: Invalid/Hallucinated ID).
+        3. If an ID exists but the description in the draft contradicts the definition -> FAIL (Reason: Mismatched Description).
+        4. If the ID and description match the context -> PASS.
         """
         
         self.output_format = """
         {
             "status": "PASS" or "FAIL",
-            "feedback": "Empty string if PASS, specific instructions on what to fix if FAIL."
+            "feedback": "Empty string if PASS, specific instructions on what to fix if FAIL. Suggest specific IDs from the context if applicable."
         }
         """
 
@@ -168,15 +185,139 @@ class AuditorAgent:
             "both": "Verify both MITRE and NICE entries for accuracy."
         }
 
+    def _load_knowledge_base(self):
+        """Loads the simplified MITRE and NICE data into memory."""
+        # Load MITRE
+        mitre_path = 'data/mitre_simple.json'
+        if os.path.exists(mitre_path):
+            try:
+                with open(mitre_path, 'r', encoding='utf-8') as f:
+                    self.mitre_data = json.load(f)
+                print(f"    [Auditor] Loaded {len(self.mitre_data)} MITRE techniques.")
+            except Exception as e:
+                print(f"    [!] Error loading MITRE KB: {e}")
+        else:
+            print("    [!] MITRE KB not found. Run simplify_mitre.py first.")
+
+        # Load NICE
+        nice_path = 'data/nice_simple.json'
+        if os.path.exists(nice_path):
+            try:
+                with open(nice_path, 'r', encoding='utf-8') as f:
+                    self.nice_data = json.load(f)
+                print(f"    [Auditor] Loaded {len(self.nice_data)} NICE elements.")
+            except Exception as e:
+                print(f"    [!] Error loading NICE KB: {e}")
+        else:
+            print("    [!] NICE KB not found. Run simplify_nice.py first.")
+
+    def _search_knowledge_base(self, query_terms: list) -> list:
+        """Simple keyword search against both KBs."""
+        results = []
+        if not self.mitre_data and not self.nice_data:
+            return results
+            
+        # Filter out common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        terms = [t.lower() for t in query_terms if t.lower() not in stop_words and len(t) > 3]
+        
+        if not terms:
+            return results
+
+        print(f"    [Auditor] Searching KB for keywords: {terms}")
+        
+        # Helper to search a dataset
+        def search_dataset(dataset, source_name):
+            local_results = []
+            for item in dataset:
+                content = (item.get('name', '') + ' ' + item.get('description', '') + ' ' + item.get('type', '')).lower()
+                score = sum(1 for term in terms if term in content)
+                if score > 0:
+                    # Add source tag for clarity
+                    item_copy = item.copy()
+                    item_copy['_source'] = source_name
+                    local_results.append((score, item_copy))
+            return local_results
+
+        # Search both
+        mitre_results = search_dataset(self.mitre_data, "MITRE ATT&CK")
+        nice_results = search_dataset(self.nice_data, "NICE Framework")
+        
+        # Sort each list by score
+        mitre_results.sort(key=lambda x: x[0], reverse=True)
+        nice_results.sort(key=lambda x: x[0], reverse=True)
+        
+        # Take top 20 from each to ensure balance and better recall
+        final_results = []
+        final_results.extend([r[1] for r in mitre_results[:20]])
+        final_results.extend([r[1] for r in nice_results[:20]])
+        
+        return final_results
+
+    def _generate_search_terms(self, user_input: str, draft_json: Dict) -> list:
+        """
+        Uses the LLM to generate smart search terms based on the user input and the draft.
+        This allows the Auditor to 'guess' relevant concepts that might not be explicitly named.
+        """
+        draft_summary = json.dumps(draft_json, indent=2)[:1000] # Truncate to save tokens if huge
+        
+        prompt = f"""
+        [TASK]
+        Analyze the USER INPUT and the DRAFT ANALYSIS.
+        Generate a list of 5-8 specific search keywords or phrases to query an internal MITRE/NICE database.
+        
+        [GOAL]
+        Find relevant MITRE Techniques and NICE Knowledge/Skills/Abilities/Tasks that might be missing or misidentified.
+        Think about synonyms, related concepts, and specific technical terms.
+        
+        [USER INPUT]
+        "{user_input}"
+        
+        [DRAFT ANALYSIS SAMPLE]
+        {draft_summary}
+        
+        [OUTPUT FORMAT]
+        Return ONLY a comma-separated list of 5-8 SINGLE KEYWORDS or SHORT CONCEPTS. 
+        Do NOT use long sentences.
+        Example: Phishing, SIEM, Logs, Malware, Headers, SMTP, Triage
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            # Split by comma first
+            raw_terms = [t.strip() for t in response.text.split(',')]
+            
+            # Flatten: Split phrases into individual words to ensure broad matching
+            final_terms = []
+            for term in raw_terms:
+                # Split by space
+                words = term.split()
+                final_terms.extend(words)
+            
+            # Remove duplicates and short words
+            final_terms = list(set([w for w in final_terms if len(w) > 3]))
+            
+            print(f"    [Auditor] Generated smart search terms: {final_terms}")
+            return final_terms
+        except Exception as e:
+            print(f"    [!] Failed to generate search terms: {e}")
+            # Fallback to naive splitting
+            return user_input.replace(',', ' ').replace('.', ' ').split()
+
     def verify(self, original_input: str, draft_json: Dict, focus: str = "both") -> Dict:
         print(f"    [Auditor] Verifying data against official sources...")
         
-        # Step 1: Extract only IDs from draft_json
+        # Step 1: Extract IDs from draft to look them up specifically
         ids = []
-        # We only have MITRE data locally. KSA/NICE data is not in the 'data' directory.
-        keys_to_check = ['mitre_attack']
-
-        for key in keys_to_check:
+        # Check MITRE IDs
+        if 'mitre_attack' in draft_json:
+            for item in draft_json['mitre_attack']:
+                if 'id' in item:
+                    ids.append(item['id'])
+        
+        # Check NICE IDs
+        nice_keys = ['knowledge', 'skills', 'abilities', 'tasks']
+        for key in nice_keys:
             if key in draft_json:
                 for item in draft_json[key]:
                     if 'id' in item:
@@ -184,33 +325,109 @@ class AuditorAgent:
 
         ids = sorted(list(set(ids)))
 
-        # Step 2: Retrieve context from internal knowledge base
+        # Step 2: Build Context
         internal_context = ""
-        if ids:
-            pattern = ", ".join(ids)
-            target_path = 'data/mitre_simple.json'
+        
+        # A. Look up the specific IDs the Hunter chose
+        found_items = []
+        
+        # Search MITRE
+        if self.mitre_data:
+            found_items.extend([item for item in self.mitre_data if item['id'] in ids])
             
-            print(f"    [Auditor] Searching for IDs: {pattern[:100]}...")
+        # Search NICE
+        if self.nice_data:
+            found_items.extend([item for item in self.nice_data if item['id'] in ids])
             
-            if os.path.exists(target_path):
-                try:
-                    with open(target_path, 'r', encoding='utf-8') as f:
-                        mitre_data = json.load(f)
+        if found_items:
+            internal_context += "=== DEFINITIONS OF DRAFT IDS ===\n"
+            for item in found_items:
+                internal_context += json.dumps(item, indent=2) + "\n"
+        
+        # B. Perform INTELLIGENT Keyword Search
+        # Use LLM to generate search terms instead of naive splitting
+        search_terms = self._generate_search_terms(original_input, draft_json)
+        alternatives = self._search_knowledge_base(search_terms)
+        
+        if alternatives:
+            internal_context += "\n=== POTENTIAL ALTERNATIVES FOUND IN KB ===\n"
+            internal_context += "(The junior analyst may have missed these. Use them to correct the draft if necessary.)\n"
+            for item in alternatives:
+                internal_context += json.dumps(item, indent=2) + "\n"
+
+        # C. Perform Targeted Search for Invalid IDs
+        # If an ID was used but not found in the KB, search for its DESCRIPTION to find the real ID.
+        invalid_id_suggestions = []
+        
+        # Identify which IDs were in the draft but NOT found in the KB
+        found_ids = {item['id'] for item in found_items}
+        invalid_ids = [uid for uid in ids if uid not in found_ids]
+        
+        if invalid_ids:
+            print(f"    [Auditor] Investigating {len(invalid_ids)} invalid IDs...")
+            
+            # Helper to find description in draft
+            def get_draft_description(target_id):
+                for key in ['mitre_attack', 'knowledge', 'skills', 'abilities', 'tasks']:
+                    if key in draft_json:
+                        for item in draft_json[key]:
+                            if item.get('id') == target_id:
+                                return item.get('description', item.get('name', ''))
+                return ""
+
+            for uid in invalid_ids:
+                desc = get_draft_description(uid)
+                if desc:
+                    # Determine likely source based on ID format
+                    target_source = "NICE Framework" # Default
                     
-                    # Filter locally in Python
-                    found_items = [item for item in mitre_data if item['id'] in ids]
-                    
-                    for item in found_items:
-                        new_context = f"Found in {target_path}:\n"
-                        new_context += json.dumps(item, indent=2) + "\n"
-                        if len(internal_context) + len(new_context) < 6000:
-                            internal_context += new_context
+                    if uid.startswith(('K', 'S', 'A')):
+                        target_source = "NICE Framework"
+                    elif uid.startswith('T'):
+                        # Ambiguous: Could be MITRE Technique (Txxxx) or NICE Task (Txxxx)
+                        # Check for dot (MITRE sub-technique)
+                        if '.' in uid:
+                            target_source = "MITRE ATT&CK"
                         else:
-                            break
-                except Exception as e:
-                    print(f"    [!] Error reading simplified MITRE file: {e}")
-            else:
-                print(f"    [!] Simplified MITRE file '{target_path}' not found. Run simplify_mitre.py first.")
+                            # Check context
+                            in_mitre = False
+                            if 'mitre_attack' in draft_json:
+                                for item in draft_json['mitre_attack']:
+                                    if item.get('id') == uid:
+                                        in_mitre = True
+                                        break
+                            
+                            if in_mitre:
+                                target_source = "MITRE ATT&CK"
+                            else:
+                                target_source = "NICE Framework" # Assume Task if not in MITRE list
+                    else:
+                        # Fallback to section check
+                        if 'mitre_attack' in draft_json:
+                            for item in draft_json['mitre_attack']:
+                                if item.get('id') == uid:
+                                    target_source = "MITRE ATT&CK"
+                                    break
+                    
+                    # Clean description for search
+                    clean_desc = desc.replace('Knowledge of', '').replace('Skill in', '').replace('Ability to', '').split()
+                    clean_desc = [w for w in clean_desc if len(w) > 3]
+                    
+                    # Search KB
+                    matches = self._search_knowledge_base(clean_desc)
+                    
+                    # FILTER matches by source
+                    filtered_matches = [m for m in matches if m.get('_source') == target_source]
+                    
+                    # Special handling for T-codes (Task vs Technique)
+                    # If we want NICE, ensure we don't get MITRE T-codes
+                    if target_source == "NICE Framework":
+                         filtered_matches = [m for m in filtered_matches if m.get('_source') == "NICE Framework"]
+                    
+                    if filtered_matches:
+                        best_match = filtered_matches[0] # Top result from correct source
+                        # print(f"    [DEBUG] UID: {uid}, Source: {target_source}, Best Match: {best_match['id']} ({best_match.get('_source')})")
+                        invalid_id_suggestions.append(f"For invalid {uid} ('{desc[:30]}...'), consider {best_match['id']} ({best_match.get('description', '')[:50]}...)")
 
         # Step 3: Call the model for verification, now with ripgrep context
         json_str = json.dumps(draft_json, indent=2)
@@ -233,7 +450,7 @@ class AuditorAgent:
         [INTERNAL KNOWLEDGE BASE CONTEXT]
         __INTERNAL_CONTEXT__
 
-        INSTRUCTION: Verify the junior analyst's draft against the internal knowledge base context. The internal context is the source of truth.
+        INSTRUCTION: Verify the junior analyst's draft against the internal knowledge base context. The internal knowledge base context is the source of truth.
 
         [REQUIRED JSON OUTPUT FORMAT]
         __OUTPUT_FORMAT__
@@ -250,10 +467,32 @@ class AuditorAgent:
         try:
             chat = self.model.start_chat(history=[])
             response = chat.send_message(final_prompt)
-            return self._clean_json(response.text)
+            result = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+            
+            # --- ENHANCEMENT: AUTO-SUGGEST CORRECTIONS ---
+            # If the model failed the audit, let's append specific suggestions
+            if result.get("status") == "FAIL":
+                suggestions = []
+                
+                # 1. Add specific corrections for invalid IDs (High Priority)
+                if invalid_id_suggestions:
+                    suggestions.extend(invalid_id_suggestions)
+                
+                # 2. Add general smart search alternatives (Low Priority)
+                if alternatives:
+                     # Suggest top 4 IDs (2 MITRE, 2 NICE roughly)
+                    for alt in alternatives[:4]:
+                        suggestions.append(f"General Suggestion: {alt['id']} ({alt.get('name', alt.get('description', ''))[:50]}...)")
+                
+                if suggestions:
+                    suggestion_text = "\n[AUDITOR SUGGESTIONS]:\n" + "\n".join(suggestions)
+                    result["feedback"] += suggestion_text
+                    print(f"    [Auditor] Appended {len(suggestions)} suggestions to feedback.")
+            
+            return result
         except Exception as e:
             print(f"    [!] Auditor Malfunction: {e}")
-            return {"status": "PASS", "feedback": "Auditor crashed, manual check recommended."}
+            return {"status": "FAIL", "feedback": "Auditor crashed. Please retry."}
 
     def _clean_json(self, text: str) -> Dict:
         try:
